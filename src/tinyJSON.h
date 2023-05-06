@@ -21,15 +21,7 @@ static_assert(sizeof(ColumnFloat32) == 4);
 typedef double ColumnFloat64;
 static_assert(sizeof(ColumnFloat64) == 8);
 
-typedef std::variant<
-    ColumnString,
-    ColumnUInt32,
-    ColumnInt32,
-    ColumnUInt64,
-    ColumnInt64,
-    ColumnFloat32,
-    ColumnFloat64> ColumnType;
-
+typedef std::unordered_map<std::string, std::vector<std::uint32_t>> HashIndex;
 
 struct Row
 {
@@ -68,11 +60,25 @@ public:
     };
 };
 
+
+/// Structure that will contain the data stored as columnar data
 struct ColumnarDatabase
 {
 public:
-    std::vector<ColumnString> symbol_v;
-    std::vector<ColumnString> date_v;
+    std::uint32_t index = 0;
+    /// string values can include a cache value,
+    /// since looking for strings is an expensive operation
+    HashIndex symbol_m;
+    HashIndex date_m;
+    /// for avoiding repetition of strings in symbol_v
+    /// and date_v, let's keep a cache of strings, and
+    /// to make faster the lookup, use a hash as key
+    /// symbol_v and date_v will just keep a pointer
+    /// to the stored strings.
+    std::unordered_map<ColumnString, ColumnString> strings;
+
+    std::vector<ColumnString *> symbol_v;
+    std::vector<ColumnString *> date_v;
 
     std::vector<ColumnFloat32> high_v;
     std::vector<ColumnFloat32> low_v;
@@ -93,8 +99,25 @@ public:
         ColumnUInt32 volume,
         ColumnFloat32 split_coefficient)
     {
-        symbol_v.push_back(symbol);
-        date_v.push_back(date);
+        symbol_m[symbol].push_back(index);
+        date_m[date].push_back(index);
+
+        auto look_up_fn = [&](ColumnString value)
+        {
+            auto it = strings.find(value);
+            
+            if (it == strings.end())
+            {
+                strings[value] = value;
+                it = strings.find(value);
+            }
+
+            return &it->second;
+        };
+        
+        symbol_v.push_back(look_up_fn(symbol));
+        date_v.push_back(look_up_fn(date));
+        
         high_v.push_back(high);
         low_v.push_back(low);
         open_v.push_back(open);
@@ -102,15 +125,17 @@ public:
         close_adjusted_v.push_back(close_adjusted);
         volume_v.push_back(volume);
         split_coefficient_v.push_back(split_coefficient);
+        index++;
     }
 
+    /// I offer a similar interface to the row storage
     struct getSymbol
     {
-        const std::vector<ColumnString> & operator()(ColumnarDatabase const & r) { return r.symbol_v; }
+        const std::unordered_map<std::string, std::vector<std::uint32_t>> & operator()(ColumnarDatabase const & r) { return r.symbol_m; }
     };
     struct getDate
     {
-        const std::vector<ColumnString> & operator()(ColumnarDatabase const & r) { return r.date_v; }
+        const std::unordered_map<std::string, std::vector<std::uint32_t>> & operator()(ColumnarDatabase const & r) { return r.date_m; }
     };
     struct getHigh
     {
@@ -137,6 +162,7 @@ struct Storage
 
     Storage() = default;
     explicit Storage(std::vector<Row> && data_) : data(data_){};
+    /// Constructor for operations with ColumnarDatabase object
     explicit Storage(ColumnarDatabase && c_data_) : c_data(c_data_){};
 
     size_t count() const { return data.size(); }
@@ -159,49 +185,9 @@ struct Storage
 
         return count;
     }
-
+    /// countEquals for columnar data
     template <typename columnType, typename Op>
-    int64_t countEqualsColumn(const columnType & value) const
-    {
-        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-
-        const auto &vect = Op()(c_data);
-
-        int64_t count = std::count(vect.begin(), vect.end(), value);
-
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << "[µs] -> " << count
-                  << " elements found\n";
-
-        return count;
-    }
-
-    template <typename columnType, typename Op>
-    Storage filterEqualsColumn(const columnType & value) const
-    {
-        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-
-        ColumnarDatabase new_data;
-
-        const auto &vect = Op()(c_data);
-
-        auto it = std::find(vect.begin(), vect.end(), value);
-
-        while (it != vect.end())
-        {
-            auto index = std::distance(vect.begin(), it++);
-
-            new_data.addData(c_data.symbol_v[index], c_data.date_v[index], c_data.high_v[index], c_data.low_v[index], c_data.open_v[index], c_data.close_v[index], c_data.close_adjusted_v[index], c_data.volume_v[index], c_data.split_coefficient_v[index]);
-
-            it = std::find(it, vect.end(), value);
-        }
-        
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << "[µs] -> "
-                  << new_data.symbol_v.size() << " elements left\n";
-
-        return Storage(std::move(new_data));
-    }
+    int64_t countEqualsColumn(const columnType & value) const;
 
     template <typename columnType, typename Op>
     Storage filterEquals(const columnType & value) const
@@ -223,26 +209,9 @@ struct Storage
         return Storage(std::move(new_data));
     }
 
+    /// filterEquals for columnar data
     template <typename columnType, typename Op>
-    columnType getMaxColumn() const
-    {
-        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-
-        columnType max = std::numeric_limits<columnType>::lowest();
-
-        const auto &vect = Op()(c_data);
-
-        auto it = max_element(vect.begin(), vect.end());
-
-        if (it != vect.end())
-            max = *it;
-
-        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-        std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
-                  << "[µs] -> MAX: " << max << "\n";
-
-        return max;
-    }
+    Storage filterEqualsColumn(const columnType & value) const;
 
     template <typename columnType, typename Op>
     columnType getMax() const
@@ -265,8 +234,9 @@ struct Storage
         return max;
     }
 
+    /// getMax for columnar data
     template <typename columnType, typename Op>
-    columnType getMinColumn() const
+    columnType getMaxColumn() const
     {
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
@@ -274,7 +244,7 @@ struct Storage
 
         const auto &vect = Op()(c_data);
 
-        auto it = min_element(vect.begin(), vect.end());
+        auto it = max_element(vect.begin(), vect.end());
 
         if (it != vect.end())
             max = *it;
@@ -306,23 +276,27 @@ struct Storage
 
         return min;
     }
-
+    
+    /// getMin for columnar data
     template <typename columnType, typename Op>
-    columnType getSumColumn() const
+    columnType getMinColumn() const
     {
         std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
-        columnType sum{0};
+        columnType max = std::numeric_limits<columnType>::lowest();
 
         const auto &vect = Op()(c_data);
 
-        sum = std::accumulate(vect.begin(), vect.end(), sum);
+        auto it = min_element(vect.begin(), vect.end());
+
+        if (it != vect.end())
+            max = *it;
 
         std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
         std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
-                  << "[µs] -> SUM: " << sum << "\n";
+                  << "[µs] -> MAX: " << max << "\n";
 
-        return sum;
+        return max;
     }
 
     template <typename columnType, typename Op>
@@ -336,6 +310,25 @@ struct Storage
         {
             sum += Op()(e);
         }
+
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+        std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
+                  << "[µs] -> SUM: " << sum << "\n";
+
+        return sum;
+    }
+
+    /// getSum for columnar data
+    template <typename columnType, typename Op>
+    columnType getSumColumn() const
+    {
+        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
+        columnType sum{0};
+
+        const auto &vect = Op()(c_data);
+
+        sum = std::accumulate(vect.begin(), vect.end(), sum);
 
         std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
         std::cout << __func__ << " : " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
