@@ -34,8 +34,11 @@ int main(int argc, char ** argv)
             e.split_coefficient = static_cast<ColumnFloat32>(doc["split_coefficient"].get_double());
 
             // Simulate that we have 10x the data that we do
-            for (size_t i = 0; i < 10; i++)
+            for (size_t i = 0; i < 100; i++)
+            {
                 database.data.push_back(e);
+                database.c_data.addData(e.symbol, e.date, e.high, e.low, e.open, e.close, e.close_adjusted, e.volume, e.split_coefficient);
+            }
         }
     }
     catch (std::exception & e)
@@ -48,14 +51,20 @@ int main(int argc, char ** argv)
     for (size_t i = 0; i < iterations; i++)
     {
         database.countEquals<ColumnString, Row::getSymbol>("AMD");
+        database.countEqualsColumn<ColumnString, ColumnarDatabase::getSymbol>("AMD");
 
         database.filterEquals<ColumnString, Row::getSymbol>("GOOG").getMax<ColumnFloat32, Row::getHigh>();
+        database.filterEqualsColumn<ColumnString, ColumnarDatabase::getSymbol>("GOOG").getMaxColumn<ColumnFloat32, ColumnarDatabase::getHigh>();
 
         database.filterEquals<ColumnString, Row::getSymbol>("ACAD")
             .filterEquals<ColumnString, Row::getDate>("2017-08-14")
             .getMin<ColumnFloat32, Row::getLow>();
+        database.filterEqualsColumn<ColumnString, ColumnarDatabase::getSymbol>("ACAD")
+            .filterEqualsColumn<ColumnString, ColumnarDatabase::getDate>("2017-08-14")
+            .getMinColumn<ColumnFloat32, ColumnarDatabase::getLow>();
 
         database.filterEquals<ColumnString, Row::getDate>("2017-08-14").getSum<ColumnUInt64, Row::getVolume>();
+        database.filterEqualsColumn<ColumnString, ColumnarDatabase::getDate>("2017-08-14").getSumColumn<ColumnUInt64, ColumnarDatabase::getVolume>();
     }
 
     return 0;
